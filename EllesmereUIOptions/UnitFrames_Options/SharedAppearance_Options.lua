@@ -173,7 +173,7 @@ function ns.UFO_BuildDisplaySection(parent, y, ctx)
     if _visRows and optState.selectedUnit == "player" then
         _visRows[#_visRows + 1] =
             { type = "toggle", label = "Show When Mana Missing",
-              tooltip = "Shows the frame while you are out of combat and your mana is below full; while enabled, a frame hidden by its visibility setting can still be clicked.",
+              tooltip = "Shows the frame while you are out of combat and your mana is below full (it hides a few seconds after mana refills); while enabled, a frame hidden by its visibility setting can still be clicked.",
               disabled = function() return InCombatLockdown() end,
               disabledTooltip = "Change mana visibility out of combat",
               get = function() return SVal("showWhenManaMissing", false) == true end,

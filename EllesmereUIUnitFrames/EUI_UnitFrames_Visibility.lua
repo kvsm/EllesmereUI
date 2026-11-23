@@ -89,7 +89,7 @@ end
 -- Show When Health Missing / Show When Mana Missing are display-only reveals. The
 -- health curve result is always secret (UnitHealthPercent returns secrets): hand
 -- it directly to alpha setters, never use it as a Lua condition. Those frames'
--- GetAlpha then reads secret too. Mana is tested in Lua, out of combat only.
+-- GetAlpha then reads secret too. Mana is tracked from its update events instead.
 local MANA = Enum.PowerType.Mana
 
 -- Mana reveal applies to the player frame only, and only for a character with a
@@ -122,37 +122,80 @@ function ns.HealthVisibilityEnabled(s, frame)
     return health or mana
 end
 
--- Show When Mana Missing is checked out of combat only. There the player's mana
--- reads clean, so it is a plain Lua test and combines with the health reveal as
--- an ordinary "or". In combat (or should a value read secret) it does not
--- reveal, leaving the frame to its visibility setting and the health reveal.
-local function PlayerManaMissing(frame)
-    if frame._healthVisInCombat then return false end
-    local cur, mx = UnitPower("player", MANA), UnitPowerMax("player", MANA)
-    if not cur or not mx or issecretvalue(cur) or issecretvalue(mx) then return false end
-    return mx > 0 and cur < mx
-end
-
--- The reveal alpha from the flags and base stamped by HealthVisibilityAlpha:
--- full opacity while mana is missing, else the health curve (1 below full
--- health, the base at full), else the base.
-local function PaintReveal(frame)
-    local base = frame._healthVisBase
-    if frame._healthVisMana and PlayerManaMissing(frame) then return 1 end
-    if not frame._healthVisHealth then return base end
-    local c = frame._healthVisCurve
+-- Step curve: 1 below full, the stamped base alpha at full. Re-pointed only
+-- when the base changes (stamp kept in frame[stampKey]).
+local function BaseCurve(frame, key, stampKey, base)
+    local c = frame[key]
     if not c then
         c = C_CurveUtil.CreateCurve()
         c:SetType(Enum.LuaCurveType.Step)
-        frame._healthVisCurve = c
+        frame[key] = c
     end
-    if frame._healthVisCurveAlpha ~= base then
+    if frame[stampKey] ~= base then
         c:ClearPoints()
         c:AddPoint(0, 1)
         c:AddPoint(1, base)
-        frame._healthVisCurveAlpha = base
+        frame[stampKey] = base
     end
-    return UnitHealthPercent(frame._euiUnit, false, c)
+    return c
+end
+
+-- Mana missing, as a clean boolean. Mana reads secret even out of combat (WoW
+-- Forever), and two secret curve results cannot be combined (a curve point will
+-- not take a secret), so mana is not read at all. Instead: mana only changes,
+-- and UNIT_POWER_UPDATE only fires, while it is below full. Regen ticks every
+-- 2s and stops at full; a cast that costs mana pauses regen for 5s (the five
+-- second rule). So mana counts as missing until a quiet spell has passed since
+-- the last mana update (one tick plus slack) or mana-cost cast (the 5s pause
+-- plus one tick plus slack). The frame hides up to that long after mana fills.
+-- Same signal as the mana regen spark (EllesmereUI_ManaRegenSpark.lua).
+local MANA_TICK_QUIET = 2.5
+local MANA_CAST_QUIET = 7.5
+local manaActiveUntil = 0
+local manaTimer
+
+local function ManaQuietCheck()
+    manaTimer = nil
+    local left = manaActiveUntil - GetTime()
+    if left > 0 then
+        manaTimer = C_Timer.NewTimer(left + 0.05, ManaQuietCheck)
+        return
+    end
+    ns.UpdateHealthVisibilityUnit("player")
+end
+
+local function NoteManaActivity(quiet)
+    local t = GetTime() + quiet
+    if t > manaActiveUntil then manaActiveUntil = t end
+    if not manaTimer then manaTimer = C_Timer.NewTimer(quiet + 0.05, ManaQuietCheck) end
+end
+
+-- True when the spell's cost includes mana. A secret amount counts as a cost;
+-- only a plain 0 is free (as in EllesmereUI_ManaRegenSpark.lua).
+local function CostsMana(spellID)
+    if not spellID or issecretvalue(spellID) then return false end
+    local costs = C_Spell.GetSpellPowerCost(spellID)
+    if not costs then return false end
+    for i = 1, #costs do
+        local c = costs[i]
+        if not issecretvalue(c.type) and c.type == MANA then
+            local amt = c.cost
+            return issecretvalue(amt) or (type(amt) == "number" and amt > 0)
+        end
+    end
+    return false
+end
+
+-- The reveal alpha from the flags and base stamped by HealthVisibilityAlpha:
+-- full opacity while mana is missing (out of combat only), else the health
+-- curve (1 below full health, the base at full), else the base.
+local function PaintReveal(frame)
+    local base = frame._healthVisBase
+    if frame._healthVisMana and not frame._healthVisInCombat and GetTime() < manaActiveUntil then
+        return 1
+    end
+    if not frame._healthVisHealth then return base end
+    return UnitHealthPercent(frame._euiUnit, false, BaseCurve(frame, "_healthVisCurve", "_healthVisCurveAlpha", base))
 end
 
 -- Every writer of the reveal (the visibility pass, both hover handlers) goes
@@ -209,10 +252,19 @@ function ns.SyncHealthVisibilityEvents()
     if not eventFrame then
         if mask == 0 then return end
         eventFrame = CreateFrame("Frame")
-        eventFrame:SetScript("OnEvent", function(_, event, unit, powerToken)
-            if event == "PLAYER_FOCUS_CHANGED" then unit = "focus" end
-            -- A secret token counts as a match; other power types are ignored.
-            if event == "UNIT_POWER_UPDATE" and not issecretvalue(powerToken) and powerToken ~= "MANA" then return end
+        eventFrame:SetScript("OnEvent", function(_, event, unit, arg2, arg3)
+            if event == "PLAYER_FOCUS_CHANGED" then
+                unit = "focus"
+            elseif event == "UNIT_POWER_UPDATE" then
+                -- arg2 is the power token. A secret token counts as mana; other
+                -- power types are ignored.
+                if not issecretvalue(arg2) and arg2 ~= "MANA" then return end
+                NoteManaActivity(MANA_TICK_QUIET)
+            elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+                -- arg3 is the spell ID.
+                if not CostsMana(arg3) then return end
+                NoteManaActivity(MANA_CAST_QUIET)
+            end
             ns.UpdateHealthVisibilityUnit(unit)
         end)
         ns.healthVisibilityEvents = eventFrame
@@ -232,6 +284,7 @@ function ns.SyncHealthVisibilityEvents()
         if playerMana then
             eventFrame:RegisterUnitEvent("UNIT_POWER_UPDATE", "player")
             eventFrame:RegisterUnitEvent("UNIT_MAXPOWER", "player")
+            eventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
         end
         if focus then eventFrame:RegisterEvent("PLAYER_FOCUS_CHANGED") end
     end
