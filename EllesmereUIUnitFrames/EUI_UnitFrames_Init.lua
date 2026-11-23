@@ -2150,7 +2150,7 @@ local function InitializeFrames()
                 -- must not pin anything, and an override of "never" must pin even though
                 -- the stored scalar says otherwise.
                 local visNever = (visOv or vis) == "never"
-                -- Health cannot be a secure macro condition. Keep the unit watch
+                -- Health and mana cannot be secure macro conditions. Keep the unit watch
                 -- active and let the secret-safe alpha curve reveal injured units.
                 if ns.HealthVisibilityEnabled(s, frame) then visTail = nil end
                 local wantDriver
@@ -2186,7 +2186,7 @@ local function InitializeFrames()
                 -- a dismount inside a lockdown would otherwise hide it permanently.
                 -- _ufInCombat leads InCombatLockdown() on regen, so the ooc fade is instant.
                 local bodyAlpha, hoverGated = ns.ResolveVisResting(s, frame, ext, hiddenByOpts, _ufInCombat)
-                if s.showWhenHealthMissing and not hiddenByOpts then
+                if (s.showWhenHealthMissing or s.showWhenManaMissing) and not hiddenByOpts then
                     bodyAlpha = ns.HealthVisibilityAlpha(s, frame, bodyAlpha, hoverGated, _ufInCombat)
                 else
                     -- Off, or a Visibility Option hides it: health ticks must not reveal.
