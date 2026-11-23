@@ -156,10 +156,7 @@ function ns.UFO_BuildDisplaySection(parent, y, ctx)
     -- UpdateFrameVisibility (reacts to the regen path); reuses CDM fade strings
     -- for consistency. Fade rows appear only for the EllesmereUI source.
     local _visSrcIsEui = ns.GetUnitFrameSource(optState.selectedUnit) == "eui"
-    AttachFrameSourceCog(visRow._leftRegion, optState.selectedUnit, {
-        title = _visSrcIsEui and "Frame Source & Visibility" or "Frame Source",
-        cogTooltip = _visSrcIsEui and "Frame Source & Visibility" or "Frame Source",
-        extraRows = _visSrcIsEui and {
+    local _visRows = _visSrcIsEui and {
             { type = "toggle", label = "Show When Health Missing",
               tooltip = "Shows the frame while this unit is below full health; while enabled, a frame hidden by its visibility setting can still be clicked.",
               disabled = function() return InCombatLockdown() end,
@@ -169,6 +166,24 @@ function ns.UFO_BuildDisplaySection(parent, y, ctx)
                   SSet("showWhenHealthMissing", v)
                   if ns.UpdateFrameVisibility then ns.UpdateFrameVisibility() end
               end },
+    }
+    -- Show When Mana Missing: player frame only (ns.MissingRevealFlags), for a
+    -- character with a mana pool, checked out of combat only. Combined with Show
+    -- When Health Missing, either resource below full reveals the frame.
+    if _visRows and optState.selectedUnit == "player" then
+        _visRows[#_visRows + 1] =
+            { type = "toggle", label = "Show When Mana Missing",
+              tooltip = "Shows the frame while you are out of combat and your mana is below full; while enabled, a frame hidden by its visibility setting can still be clicked.",
+              disabled = function() return InCombatLockdown() end,
+              disabledTooltip = "Change mana visibility out of combat",
+              get = function() return SVal("showWhenManaMissing", false) == true end,
+              set = function(v)
+                  SSet("showWhenManaMissing", v)
+                  if ns.UpdateFrameVisibility then ns.UpdateFrameVisibility() end
+              end }
+    end
+    if _visRows then
+        local _fadeRows = {
             { type = "toggle", label = "Fade Out of Combat",
               tooltip = "Fades the entire frame (portrait, health and power bars, text) while out of combat.",
               get = function() return SVal("oocFadeEnabled", false) == true end,
@@ -185,7 +200,13 @@ function ns.UFO_BuildDisplaySection(parent, y, ctx)
                   SSet("oocAlpha", v / 100)
                   if ns.UpdateFrameVisibility then ns.UpdateFrameVisibility() end
               end },
-        },
+        }
+        for _, row in ipairs(_fadeRows) do _visRows[#_visRows + 1] = row end
+    end
+    AttachFrameSourceCog(visRow._leftRegion, optState.selectedUnit, {
+        title = _visSrcIsEui and "Frame Source & Visibility" or "Frame Source",
+        cogTooltip = _visSrcIsEui and "Frame Source & Visibility" or "Frame Source",
+        extraRows = _visRows,
     })
 
     -- Non-EUI source: no EUI frame spawned, so nothing below applies. Keep the

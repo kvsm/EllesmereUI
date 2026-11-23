@@ -3,7 +3,7 @@ if EUI_CLIENT_BLOCKED then return end -- pre-12.1 client failsafe (EllesmereUI_C
 --  EUI_UnitFrames_Visibility.lua
 --
 --  Frame alpha and visibility helpers (fade out of combat, resting alpha,
---  show on missing health) and the frame hover handlers, published as
+--  show on missing health or mana) and the frame hover handlers, published as
 --  I.UnitFrame_OnEnter / I.UnitFrame_OnLeave for EUI_UnitFrames_Init.lua.
 --  Reads the main file through ns and ns._internals; db via I.dbSetters.
 -------------------------------------------------------------------------------
@@ -49,7 +49,7 @@ function ns.ResolveVisResting(s, frame, ext, hiddenByOpts, inCombat)
     if vis == "never" then return 0, false end
     if vis == "in_combat" then return inCombat and shownAlpha or 0, false end
     if vis == "out_of_combat" then return (not inCombat) and shownAlpha or 0, false end
-    if s.showWhenHealthMissing then
+    if s.showWhenHealthMissing or s.showWhenManaMissing then
         if vis == "in_raid" then return IsInRaid() and shownAlpha or 0, false end
         if vis == "in_party" then return (IsInGroup() and not IsInRaid()) and shownAlpha or 0, false end
         if vis == "solo" then return (not IsInGroup()) and shownAlpha or 0, false end
@@ -86,53 +86,107 @@ function ns.VisMouseoverWired(s)
     return (EllesmereUI.VisOverrideValue(s)) == "mouseover"
 end
 
--- Health visibility is a display-only reveal. The curve result is always secret
--- (UnitHealthPercent returns secrets): hand it directly to alpha setters, never
--- use it as a Lua condition. Those frames' GetAlpha then reads secret too.
-function ns.HealthVisibilityEnabled(s, frame)
-    if not s or not s.showWhenHealthMissing or not frame then return false end
+-- Show When Health Missing / Show When Mana Missing are display-only reveals. The
+-- health curve result is always secret (UnitHealthPercent returns secrets): hand
+-- it directly to alpha setters, never use it as a Lua condition. Those frames'
+-- GetAlpha then reads secret too. Mana is tested in Lua, out of combat only.
+local MANA = Enum.PowerType.Mana
+
+-- Mana reveal applies to the player frame only, and only for a character with a
+-- mana pool. The max reads clean outside combat; while it reads secret the last
+-- clean answer stands (unknown counts as no mana, so a warrior never reveals).
+local function PlayerHasMana(frame)
+    local mx = UnitPowerMax("player", MANA)
+    if mx and not issecretvalue(mx) then frame._manaVisHasMana = mx > 0 end
+    return frame._manaVisHasMana == true
+end
+
+-- Which reveals apply to this frame right now: health, mana (two booleans).
+function ns.MissingRevealFlags(s, frame)
+    if not s or not frame then return false, false end
+    local wantHealth, wantMana = s.showWhenHealthMissing, s.showWhenManaMissing
+    if not (wantHealth or wantMana) then return false, false end
     local unit = frame._euiUnit
-    if unit ~= "player" and unit ~= "target" and unit ~= "focus" then return false end
-    if ns.VisUnitDisabled(db.profile, unit) then return false end
+    if unit ~= "player" and unit ~= "target" and unit ~= "focus" then return false, false end
+    if ns.VisUnitDisabled(db.profile, unit) then return false, false end
     local override = EllesmereUI.VisOverrideValue(s)
-    return (override or s.barVisibility or "always") ~= "never"
+    if (override or s.barVisibility or "always") == "never" then return false, false end
+    local health = wantHealth and true or false
+    local mana = (wantMana and unit == "player" and PlayerHasMana(frame)) and true or false
+    return health, mana
+end
+
+-- True when any missing-resource reveal applies (health or mana).
+function ns.HealthVisibilityEnabled(s, frame)
+    local health, mana = ns.MissingRevealFlags(s, frame)
+    return health or mana
+end
+
+-- Show When Mana Missing is checked out of combat only. There the player's mana
+-- reads clean, so it is a plain Lua test and combines with the health reveal as
+-- an ordinary "or". In combat (or should a value read secret) it does not
+-- reveal, leaving the frame to its visibility setting and the health reveal.
+local function PlayerManaMissing(frame)
+    if frame._healthVisInCombat then return false end
+    local cur, mx = UnitPower("player", MANA), UnitPowerMax("player", MANA)
+    if not cur or not mx or issecretvalue(cur) or issecretvalue(mx) then return false end
+    return mx > 0 and cur < mx
+end
+
+-- The reveal alpha from the flags and base stamped by HealthVisibilityAlpha:
+-- full opacity while mana is missing, else the health curve (1 below full
+-- health, the base at full), else the base.
+local function PaintReveal(frame)
+    local base = frame._healthVisBase
+    if frame._healthVisMana and PlayerManaMissing(frame) then return 1 end
+    if not frame._healthVisHealth then return base end
+    local c = frame._healthVisCurve
+    if not c then
+        c = C_CurveUtil.CreateCurve()
+        c:SetType(Enum.LuaCurveType.Step)
+        frame._healthVisCurve = c
+    end
+    if frame._healthVisCurveAlpha ~= base then
+        c:ClearPoints()
+        c:AddPoint(0, 1)
+        c:AddPoint(1, base)
+        frame._healthVisCurveAlpha = base
+    end
+    return UnitHealthPercent(frame._euiUnit, false, c)
 end
 
 -- Every writer of the reveal (the visibility pass, both hover handlers) goes
--- through here, so the curve always maps full health to the base alpha last
--- painted, and _healthVisLive says whether the reveal currently applies.
+-- through here, so the curves always map full health / mana to the base alpha
+-- last painted, and _healthVisLive says whether the reveal currently applies.
 function ns.HealthVisibilityAlpha(s, frame, baseAlpha, hoverGated, inCombat)
-    if not ns.HealthVisibilityEnabled(s, frame) then
+    local health, mana = ns.MissingRevealFlags(s, frame)
+    if not (health or mana) then
         if frame then frame._healthVisLive = nil end
         return baseAlpha
     end
     frame._healthVisLive = true
     -- A visibility refresh must preserve an active mouseover reveal. Keep
-    -- this decision on clean UI state, before evaluating the health curve.
+    -- this decision on clean UI state, before evaluating the curves.
     if hoverGated and frame._healthVisHovered then
         baseAlpha = ns.ResolveFrameAlpha(s, inCombat)
     end
-    if not frame._healthVisCurve then
-        frame._healthVisCurve = C_CurveUtil.CreateCurve()
-        frame._healthVisCurve:SetType(Enum.LuaCurveType.Step)
-    end
-    if frame._healthVisCurveAlpha ~= baseAlpha then
-        frame._healthVisCurve:ClearPoints()
-        frame._healthVisCurve:AddPoint(0, 1)
-        frame._healthVisCurve:AddPoint(1, baseAlpha)
-        frame._healthVisCurveAlpha = baseAlpha
-    end
-    return UnitHealthPercent(frame._euiUnit, false, frame._healthVisCurve)
+    frame._healthVisBase = baseAlpha
+    frame._healthVisHealth, frame._healthVisMana = health, mana
+    -- Combat state for the mana check: the pass hands over its event-tracked
+    -- _ufInCombat and repaints on every combat edge; hover handlers pass none.
+    if inCombat == nil then inCombat = InCombatLockdown() end
+    frame._healthVisInCombat = inCombat and true or false
+    return PaintReveal(frame)
 end
 
--- A health event moves only the curve's input: the base alpha and whether the
--- reveal applies change on visibility events and hover, which repaint through
--- HealthVisibilityAlpha above. So a health tick re-evaluates the stamped curve
--- and re-derives nothing (this runs on every UNIT_HEALTH in combat).
+-- A health or mana event moves only the inputs: the base alpha, which reveals
+-- apply and the combat state change on visibility events and hover, which
+-- repaint through HealthVisibilityAlpha above. So a tick re-evaluates the
+-- stamped state and re-derives nothing (this runs on every UNIT_HEALTH in combat).
 function ns.UpdateHealthVisibilityUnit(unit)
     local frame = frames[unit]
-    if not (frame and frame._healthVisLive and frame._healthVisCurve) then return end
-    local alpha = UnitHealthPercent(unit, false, frame._healthVisCurve)
+    if not (frame and frame._healthVisLive and frame._healthVisBase ~= nil) then return end
+    local alpha = PaintReveal(frame)
     ;(frame._visWrap or frame):SetAlpha(alpha)
     local model = frame.Portrait and frame.Portrait.backdrop and frame.Portrait.backdrop._3d
     if model then ns.UF_SetModelAlpha(model, alpha) end
@@ -143,16 +197,22 @@ function ns.UpdateHealthVisibilityUnit(unit)
 end
 
 function ns.SyncHealthVisibilityEvents()
-    local player = ns.HealthVisibilityEnabled(db.profile.player, frames.player)
+    -- Health events go to every unit with any reveal (a mana-only player frame
+    -- just repaints its base); mana events only to the player with Show When
+    -- Mana Missing.
+    local player, playerMana = ns.MissingRevealFlags(db.profile.player, frames.player)
+    player = player or playerMana
     local target = ns.HealthVisibilityEnabled(db.profile.target, frames.target)
     local focus = ns.HealthVisibilityEnabled(db.profile.focus, frames.focus)
-    local mask = (player and 1 or 0) + (target and 2 or 0) + (focus and 4 or 0)
+    local mask = (player and 1 or 0) + (target and 2 or 0) + (focus and 4 or 0) + (playerMana and 8 or 0)
     local eventFrame = ns.healthVisibilityEvents
     if not eventFrame then
         if mask == 0 then return end
         eventFrame = CreateFrame("Frame")
-        eventFrame:SetScript("OnEvent", function(_, event, unit)
+        eventFrame:SetScript("OnEvent", function(_, event, unit, powerToken)
             if event == "PLAYER_FOCUS_CHANGED" then unit = "focus" end
+            -- A secret token counts as a match; other power types are ignored.
+            if event == "UNIT_POWER_UPDATE" and not issecretvalue(powerToken) and powerToken ~= "MANA" then return end
             ns.UpdateHealthVisibilityUnit(unit)
         end)
         ns.healthVisibilityEvents = eventFrame
@@ -169,6 +229,10 @@ function ns.SyncHealthVisibilityEvents()
         if focus then units[#units + 1] = "focus" end
         eventFrame:RegisterUnitEvent("UNIT_HEALTH", unpack(units))
         eventFrame:RegisterUnitEvent("UNIT_MAXHEALTH", unpack(units))
+        if playerMana then
+            eventFrame:RegisterUnitEvent("UNIT_POWER_UPDATE", "player")
+            eventFrame:RegisterUnitEvent("UNIT_MAXPOWER", "player")
+        end
         if focus then eventFrame:RegisterEvent("PLAYER_FOCUS_CHANGED") end
     end
 end
@@ -178,7 +242,7 @@ local function UnitFrame_OnEnter(self)
     if not unit then return end
     local unitKey = unit:match("^boss%d$") and "boss" or unit
     local s = db and db.profile and db.profile[unitKey]
-    if s and s.showWhenHealthMissing then self._healthVisHovered = true end
+    if s and (s.showWhenHealthMissing or s.showWhenManaMissing) then self._healthVisHovered = true end
     if ns.VisMouseoverWired(s) then
         -- Reveal only what is actually hover-gated right now. Under Any the frame may
         -- already be shown on another passing disjunct, in which case there is nothing to
@@ -187,7 +251,7 @@ local function UnitFrame_OnEnter(self)
         local _, hoverGated = ns.ResolveVisRestingLive(s, self)
         if hoverGated then
             local a = ns.ResolveFrameAlpha(s, InCombatLockdown())
-            if s.showWhenHealthMissing then a = ns.HealthVisibilityAlpha(s, self, a) end
+            if s.showWhenHealthMissing or s.showWhenManaMissing then a = ns.HealthVisibilityAlpha(s, self, a) end
             ;(self._visWrap or self):SetAlpha(a)
             -- 3D models don't inherit parent alpha: reveal the portrait too
             local bd3d = self.Portrait and self.Portrait.backdrop and self.Portrait.backdrop._3d
@@ -234,7 +298,7 @@ local function UnitFrame_OnLeave(self)
         -- 0: under Any a passing disjunct keeps the frame visible with no hover involved,
         -- and hiding it here would leave it wrong until the next visibility event fires.
         local leaveAlpha, _, hiddenByOpts = ns.ResolveVisRestingLive(s, self)
-        if s.showWhenHealthMissing and not hiddenByOpts then
+        if (s.showWhenHealthMissing or s.showWhenManaMissing) and not hiddenByOpts then
             leaveAlpha = ns.HealthVisibilityAlpha(s, self, leaveAlpha)
         else
             self._healthVisLive = nil

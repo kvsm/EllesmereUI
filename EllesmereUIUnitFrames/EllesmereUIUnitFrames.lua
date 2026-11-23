@@ -501,6 +501,7 @@ local defaults = {
             showSolo = true,
             barVisibility = "always",
             showWhenHealthMissing = false,
+            showWhenManaMissing = false,
             oocFadeEnabled = false,  -- "Fade Out of Combat" toggle (off by default)
             oocAlpha       = 0.5,    -- whole-frame alpha while out of combat
             visHideHousing = false,
