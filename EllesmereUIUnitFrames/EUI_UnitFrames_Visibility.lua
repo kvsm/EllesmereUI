@@ -152,22 +152,32 @@ end
 local MANA_TICK_QUIET = 2.5
 local MANA_CAST_QUIET = 7.5
 local manaActiveUntil = 0
-local manaTimer
+-- One reused one-shot animation times the quiet spell (as the spark does), so no
+-- activity creates a timer. Built on first mana activity; while it plays, new
+-- activity only pushes manaActiveUntil out and the finish replays the remainder.
+local manaQuiet, manaQuietSpan
 
-local function ManaQuietCheck()
-    manaTimer = nil
-    local left = manaActiveUntil - GetTime()
-    if left > 0 then
-        manaTimer = C_Timer.NewTimer(left + 0.05, ManaQuietCheck)
-        return
-    end
-    ns.UpdateHealthVisibilityUnit("player")
+local function PlayManaQuiet(len)
+    manaQuietSpan:SetDuration(len + 0.05)
+    manaQuiet:Play()
 end
 
 local function NoteManaActivity(quiet)
     local t = GetTime() + quiet
     if t > manaActiveUntil then manaActiveUntil = t end
-    if not manaTimer then manaTimer = C_Timer.NewTimer(quiet + 0.05, ManaQuietCheck) end
+    if not manaQuiet then
+        manaQuiet = CreateFrame("Frame"):CreateAnimationGroup()
+        manaQuietSpan = manaQuiet:CreateAnimation("Animation")
+        manaQuiet:SetScript("OnFinished", function()
+            local left = manaActiveUntil - GetTime()
+            if left > 0 then
+                PlayManaQuiet(left)
+            else
+                ns.UpdateHealthVisibilityUnit("player")
+            end
+        end)
+    end
+    if not manaQuiet:IsPlaying() then PlayManaQuiet(quiet) end
 end
 
 -- True when the spell's cost includes mana. A secret amount counts as a cost;
